@@ -4,6 +4,8 @@ This repo contains an accurate reproduction of the GRU-D model architecture desc
 
 As of yet, the publicly available Pytorch implementations are not accurate reimplementations of the above paper and fail to reproduce the results.
 
+The files under /models/grud contain modular GRUDCell and GRUD files with similar (but not identical) structure to PyTorch GRU and GRUCell. This should make doplying these modules in your own projects easier.
+
 ## Reproduction of Che et al results:
 
 Pull the repo and install the necessary dependencies with conda (or install all imports manually):
