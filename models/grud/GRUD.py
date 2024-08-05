@@ -1,0 +1,165 @@
+########################################################################
+# Part of a GRU-D implementation and reproduction from the paper:
+# https://www.nature.com/articles/s41598-018-24271-9
+#
+#
+# Copyright 2024 Sami Finnilä
+########################################################################
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+# 
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+# 
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+########################################################################
+
+import torch
+import torch.nn as nn
+
+from models.grud.GRUDCell import GRUDCell
+
+class InputDropout(nn.Module):
+    def __init__(self, dropout: float = 0.1):
+        super(InputDropout, self).__init__()
+        
+        
+        self.dropout = dropout
+        
+    def forward(self, input):
+        if self.training:
+            
+            # Input is of shape (batch, 3, seq_len, features)
+            # We want to apply dropout to the features consistently across the sequences
+            mask = torch.bernoulli(torch.ones(input.size(0),input.size(1), input.size(-1)) * (1 - self.dropout))
+
+            # Repeat the mask for each sequence in the batch
+            mask = mask.unsqueeze(2).expand(-1, -1, input.size(-2), -1).to(input.device)
+            return input * mask
+            
+        else:
+            return input
+        
+class OutputDropout(nn.Module):
+    def __init__(self, dropout: float = 0.1):
+        super(OutputDropout, self).__init__()
+        
+        self.dropout = dropout
+        
+    def forward(self, input):
+        if self.training:
+            # Input is of shape (batch, seq_len, features)
+            mask = torch.bernoulli(torch.ones(input.size(0), input.size(-1)) * (1 - self.dropout))
+            
+            # Repeat the mask for each sequence in the batch
+            mask = mask.unsqueeze(1).expand(-1, input.size(-2), -1).to(input.device)
+            return input * mask
+
+class GRUD(nn.Module):
+    def __init__(self, input_size: int, hidden_size: int, num_layers: int, x_mean: torch.Tensor | None = None, 
+                 dropout: None | float = None, device: str ='cpu', bias: bool =True, dropout_type: str ='mloss'):
+        super(GRUD, self).__init__()
+        
+        # Validate the inputs
+        if num_layers < 1:
+            raise ValueError("num_layers should be greater than 0")
+        if hidden_size < 1:
+            raise ValueError("hidden_size should be greater than 0")
+        if input_size < 1:
+            raise ValueError("input_size should be greater than 0")
+        if x_mean is not None and x_mean.size(-1) != input_size:
+            raise ValueError("x_mean should have the same number of features as input_size")
+        if dropout is not None and (dropout > 1.0 or dropout < 0.0):
+            raise ValueError("dropout should be a number in range [0, 1] representing the probability of an element being zeroed")
+        if dropout_type not in ['mloss', 'gal']:
+            raise ValueError("dropout_type should be either 'mloss' or 'gal'")
+        
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+        self.x_mean = x_mean
+        self.input_size = input_size
+        
+        self.grud_cells = nn.ModuleList()
+        
+        if dropout is not None and dropout_type == 'gal':
+            self.input_dropout = InputDropout(dropout)
+            self.output_dropout = OutputDropout(dropout)
+            
+        else:
+            self.input_dropout = None
+            self.output_dropout = None
+        
+        # First GRUDCell
+        self.grud_cells.append(GRUDCell(input_size=input_size, hidden_size=hidden_size, x_mean=x_mean, dropout=dropout, device=device, bias=bias))
+        
+        # Additional GRUDCells
+        for _ in range(num_layers-1):
+            self.grud_cells.append(GRUDCell(input_size=hidden_size, hidden_size=hidden_size, mask_size=input_size,
+                                            delta_time_size=input_size, x_mean=None, dropout=dropout, device=device, bias=bias))
+            
+    def initialize_hidden(self, batch_size):
+        device = next(self.parameters()).device
+        return torch.zeros(batch_size, self.hidden_size, device=device)
+    
+
+        
+    def forward(self, input):
+        # Input should be of shape (batch, 3, seq_len, features)
+        
+        batch_size = input.size(0)
+        seq_len = input.size(2)
+        
+        if self.input_dropout is not None:
+            input = self.input_dropout(input)
+            
+            for cell in self.grud_cells:
+                cell.reset_dropout_mask(batch_size)
+        
+        # TODO: We may wish to initialize the x_latest_observations using the x_mean instead.
+        #x_latest_observations = torch.zeros(batch_size, self.input_size).to(input.device)
+        x_latest_observations = self.x_mean.repeat(batch_size, 1).to(input.device)
+        
+        hidden_states = []
+        last_layer_hidden_states = torch.empty(seq_len, batch_size, self.hidden_size).to(input.device)
+        
+        # Initialize hidden states
+        for i in range(self.num_layers):
+            hidden_states.append(self.initialize_hidden(input.size(0)))
+        
+        
+        # Step through the sequence
+        for sequence_index in range(seq_len):
+            step_input = input[:,:,sequence_index,:].squeeze()
+            step_mask = step_input[:,1,:].squeeze()
+            step_x = step_input[:,0,:].squeeze()
+            
+            for i, cell in enumerate(self.grud_cells):
+                
+                if i == 0:
+                    # First layer
+                    # Only the first layer has use for x_latest_observations
+                    hidden_state = cell(step_input, hidden_states[i], x_latest_observations = x_latest_observations)
+                else:
+                    hidden_state = cell(step_input, hidden_states[i], x_latest_observations = None)
+                    
+                if self.output_dropout is not None and i < self.num_layers - 1:
+                    hidden_state = self.output_dropout(hidden_state)
+                
+                hidden_states[i] = hidden_state
+                
+            # Update x_latest_observations and save the hidden state of the last layer for this time point
+            x_latest_observations = torch.where(step_mask > 0, step_x, x_latest_observations)
+            last_layer_hidden_states[sequence_index] = hidden_state
+            
+        return last_layer_hidden_states
+                
+            
+            
+       
+
+    
