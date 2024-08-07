@@ -8,6 +8,16 @@ The files under /models/grud contain modular GRUDCell and GRUD files with simila
 
 ## Reproduction of Che et al results:
 
+```
+python3 grud_classifier.py --mode k_fold -k 5
+
+>>> AUC Scores:  [0.8559997859130807, 0.8564583333333332, 0.8497795039851115, 0.8428457485061258, 0.8183071076857202]
+>>> Mean AUC:  0.8446780958846745
+>>> Std AUC:  0.014083788833679355
+
+```
+
+## Usage:
 Pull the repo and install the necessary dependencies with conda (or install all imports manually):
 ```
 conda env create -f conda_env.yml
@@ -22,4 +32,4 @@ python3 grud_classifier.py
 
 ## Notes:
 
-The above python script will not do a 5-fold training/validation run on the data like in the original paper. Thus, the best AUC you will see can vary between training runs (the datasets are shuffled before each run).
+- Currently the output of the GRUD module does not conform to the PyTorch GRU documentation

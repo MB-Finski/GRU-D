@@ -28,7 +28,10 @@ import os
 from tqdm import tqdm
 from multiprocessing import Pool
 
-
+# Set a sensible amount of threads for the multiprocessing pool
+num_threads = int(np.floor(os.cpu_count() * 0.8))
+if num_threads < 1:
+    num_threads = 1
 
 init_delta_time_as_ones = False
 
@@ -110,7 +113,47 @@ for file in tqdm(os.listdir(set_a_file_path)):
     
     data[id] = df
     
+# If NI blood pressure and invasive blood pressure are present in the same dataset and during the same time point
+# we'll assume that the invasive blood pressure is the correct one and drop the NI blood pressure
+print('Merging NISysABP, NIDiasABP and NIMAP with SysABP, DiasABP and MAP...')
+def merge_blood_pressure(input):
+    df = input[1]
+    key = input[0]
+    time_points = df['Time'].unique()
+    
+    for time_point in time_points:
+        
+        df_time_slice = df[df['Time'] == time_point]
+        
+        parameters = df_time_slice['Parameter'].values
+        
+        if 'NISysABP' in parameters:
+            if 'SysABP' in parameters:
+                df_time_slice = df_time_slice[df_time_slice['Parameter'] != 'NISysABP']
+            else:
+                df_time_slice = df_time_slice.replace('NISysABP', 'SysABP')
+        if 'NIDiasABP' in parameters:
+            if 'DiasABP' in parameters:
+                df_time_slice = df_time_slice[df_time_slice['Parameter'] != 'NIDiasABP']
+            else:
+                df_time_slice = df_time_slice.replace('NIDiasABP', 'DiasABP')
+        if 'NIMAP' in parameters:
+            if 'MAP' in parameters:
+                df_time_slice = df_time_slice[df_time_slice['Parameter'] != 'NIMAP']
+            else:
+                df_time_slice = df_time_slice.replace('NIMAP', 'MAP')
+        
+        df = df[df['Time'] != time_point]
+        df = pd.concat([df, df_time_slice])
+    
+    return [key, df]
 
+pool = Pool(num_threads)
+for ret_val in tqdm(pool.imap_unordered(merge_blood_pressure,data.items()), total=len(data.keys())):    
+    data[ret_val[0]] = ret_val[1]
+    
+# Now we can drop the NISysABP, NIDiasABP and NIMAP from the parameter_ids
+parameter_ids = {key: value for key, value in parameter_ids.items() if key not in ['NISysABP', 'NIDiasABP', 'NIMAP']}    
 
 # Find the largest time value in the dataset to determine the size of the time dimension
 max_time = 0.0
@@ -212,8 +255,12 @@ def iterate_one_patient(key):
 
 # Iterate over all the patients
 patient_keys = list(data.keys())
-with Pool(10) as p:
-    grud_data_list = p.map(iterate_one_patient, patient_keys)
+grud_data_list = []
+pool = Pool(num_threads)
+
+for row in tqdm(pool.imap_unordered(iterate_one_patient, patient_keys), total=len(patient_keys)):
+    grud_data_list.append(row)
+
 
 grud_data = []
 grud_outcomes = []
@@ -258,3 +305,4 @@ np.save('./input/grud_dataset.npy', np.array(grud_data))
 np.save('./input/grud_outcomes.npy', np.array(grud_outcomes))
 np.save('./input/grud_x_mean.npy', np.array([observations_means[i] for i in range(observations.shape[1])]))
 np.save('./input/grud_last_time_point_indices.npy', np.array(last_time_point_indices))
+print('Data saved to disk!')

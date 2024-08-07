@@ -25,11 +25,34 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import roc_curve, auc, roc_auc_score
 
+class EarlyStopper:
+    def __init__(self, patience=1, min_delta=0):
+        self.patience = patience
+        self.min_delta = min_delta
+        self.counter = 0
+        self.min_validation_loss = float('inf')
+
+    def early_stop(self, validation_loss):
+        if validation_loss < self.min_validation_loss:
+            self.min_validation_loss = validation_loss
+            self.counter = 0
+        elif validation_loss > (self.min_validation_loss + self.min_delta):
+            self.counter += 1
+            if self.counter >= self.patience:
+                return True
+        return False
+
+
 def fit(model, criterion, learning_rate,
         train_dataloader, test_dataloader,
-        n_epochs=30, device='cpu', weight_decay=0):
+        n_epochs=30, device='cpu', weight_decay=0, patience=10, min_delta=0.001):
     
-    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+    
+    early_stopping = EarlyStopper(patience=patience, min_delta=min_delta)
+    
+    best_testing_loss = float('inf')
+    stored_auc = 0
     
     for epoch in range(n_epochs):
         
@@ -83,5 +106,16 @@ def fit(model, criterion, learning_rate,
         
         auc_score = roc_auc_score(label, pred)
         
+        if test_loss < best_testing_loss:
+            best_testing_loss = test_loss
+            stored_auc = auc_score
+        
         print("Epoch: {} Train loss: {:.4f}, Test loss: {:.4f}, Test AUC: {:.4f}".format(epoch, train_loss, test_loss, auc_score))
+        
+        #  Early stopping
+        if early_stopping.early_stop(test_loss):
+            print("Early stopping")
+            break
+    
+    return stored_auc
         

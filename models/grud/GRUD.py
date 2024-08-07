@@ -46,19 +46,22 @@ class InputDropout(nn.Module):
             return input
         
 class OutputDropout(nn.Module):
-    def __init__(self, dropout: float = 0.1):
+    def __init__(self, dropout: float = 0.1, device: str ='cpu'):
         super(OutputDropout, self).__init__()
         
         self.dropout = dropout
+        self.mask = None
+        self.device = device
+        
+    def reset_dropout_mask(self, batch_size, hidden_size):
+        self.mask = torch.bernoulli(torch.ones(batch_size, hidden_size) * (1 - self.dropout)).to(self.device)
         
     def forward(self, input):
+        # Input is of shape (batch, hidden_size)
         if self.training:
-            # Input is of shape (batch, seq_len, features)
-            mask = torch.bernoulli(torch.ones(input.size(0), input.size(-1)) * (1 - self.dropout))
-            
-            # Repeat the mask for each sequence in the batch
-            mask = mask.unsqueeze(1).expand(-1, input.size(-2), -1).to(input.device)
-            return input * mask
+            return input * self.mask
+        else:
+            return input
 
 class GRUD(nn.Module):
     def __init__(self, input_size: int, hidden_size: int, num_layers: int, x_mean: torch.Tensor | None = None, 
@@ -88,11 +91,13 @@ class GRUD(nn.Module):
         
         if dropout is not None and dropout_type == 'gal':
             self.input_dropout = InputDropout(dropout)
-            self.output_dropout = OutputDropout(dropout)
+            self.output_dropouts = []
+            for _ in range(num_layers):
+                self.output_dropouts.append(OutputDropout(dropout, device))
             
         else:
             self.input_dropout = None
-            self.output_dropout = None
+            self.output_dropouts = None
         
         # First GRUDCell
         self.grud_cells.append(GRUDCell(input_size=input_size, hidden_size=hidden_size, x_mean=x_mean, dropout=dropout, device=device, bias=bias))
@@ -127,9 +132,12 @@ class GRUD(nn.Module):
         hidden_states = []
         last_layer_hidden_states = torch.empty(seq_len, batch_size, self.hidden_size).to(input.device)
         
-        # Initialize hidden states
+        # Initialize hidden states and reset dropout masks for the output dropout
         for i in range(self.num_layers):
             hidden_states.append(self.initialize_hidden(input.size(0)))
+            
+            if self.output_dropouts is not None:
+                self.output_dropouts[i].reset_dropout_mask(batch_size, self.hidden_size)
         
         
         # Step through the sequence
@@ -147,8 +155,8 @@ class GRUD(nn.Module):
                 else:
                     hidden_state = cell(step_input, hidden_states[i], x_latest_observations = None)
                     
-                if self.output_dropout is not None and i < self.num_layers - 1:
-                    hidden_state = self.output_dropout(hidden_state)
+                if self.output_dropouts is not None:
+                    hidden_state = self.output_dropouts[i](hidden_state)                    
                 
                 hidden_states[i] = hidden_state
                 

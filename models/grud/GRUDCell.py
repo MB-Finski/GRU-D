@@ -105,7 +105,7 @@ class GRUDCell(nn.Module):
         hidden_state = decay_factor_h * hidden_state
 
         
-        if self.dropout_type == 'mloss':
+        if self.dropout_type == 'mloss' and self.training:
             # "Recurrent Dropout without Memory Loss" (https://arxiv.org/abs/1603.05118)
             # Eq 13:
             gate_input = torch.cat([X, hidden_state, input_mask], dim=-1)
@@ -121,7 +121,7 @@ class GRUDCell(nn.Module):
 
             # Eq 16:
             hidden_state = (1 - update_gate) * hidden_state + update_gate * new_state_candidate
-        if self.dropout_type == 'gal':
+        if self.dropout_type == 'gal' and self.training:
             # "A Theoretically Grounded Application of Dropout in Recurrent Neural Networks" (https://arxiv.org/abs/1512.05287)
             hidden_state = hidden_state * self.dropout_mask
             # Eq 13:
