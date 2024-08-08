@@ -24,6 +24,7 @@ import torch.nn as nn
 import numpy as np
 import pandas as pd
 from sklearn.metrics import roc_curve, auc, roc_auc_score
+from tqdm import tqdm
 
 class EarlyStopper:
     def __init__(self, patience=1, min_delta=0):
@@ -54,7 +55,9 @@ def fit(model, criterion, learning_rate,
     best_testing_loss = float('inf')
     stored_auc = 0
     
-    for epoch in range(n_epochs):
+    pbar = tqdm(range(n_epochs))
+    
+    for epoch in pbar:
         
         # Train the model
         losses= []
@@ -110,11 +113,10 @@ def fit(model, criterion, learning_rate,
             best_testing_loss = test_loss
             stored_auc = auc_score
         
-        print("Epoch: {} Train loss: {:.4f}, Test loss: {:.4f}, Test AUC: {:.4f}".format(epoch, train_loss, test_loss, auc_score))
+        pbar.set_description("Epoch: {} Train loss: {:.4f}, Test loss: {:.4f}, Test AUC: {:.4f}".format(epoch, train_loss, test_loss, auc_score))
         
         #  Early stopping
         if early_stopping.early_stop(test_loss):
-            print("Early stopping")
             break
     
     return stored_auc

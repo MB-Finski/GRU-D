@@ -26,13 +26,14 @@ import torch.nn.functional as F
 class GRUDCell(nn.Module):
     def __init__(self, input_size: int, hidden_size: int, mask_size: int | None = None, delta_time_size: int | None = None, 
                  x_mean: torch.Tensor | None = None, bias: bool =True, device: str ='cpu', dropout: None | float =0,
-                 dropout_type: str ='mloss'):
+                 dropout_type: str ='mloss', feed_missing_mask: bool = True):
         super(GRUDCell, self).__init__()
         
         self.device = device
         
         self.input_size = input_size
         self.hidden_size = hidden_size
+        self.feed_missing_mask = feed_missing_mask
         
         if mask_size is None:
             mask_size = input_size
@@ -44,7 +45,7 @@ class GRUDCell(nn.Module):
         else:
             self.x_mean = x_mean.clone().detach().requires_grad_(True).to(self.device)
             self.first_layer = True
-            # We only need parameters for the diagonal since we want to force the matrix to be diagonal as per the original paper
+            # We only need parameters for the diagonal since we want to force the matrix to be diagonal as per the original Che et al implementation
             self.delta_time_to_gamma_x = nn.Parameter(torch.Tensor(delta_time_size), requires_grad=True)
             self.gamma_x_bias = nn.Parameter(torch.Tensor(delta_time_size), requires_grad=True)
         
@@ -58,9 +59,10 @@ class GRUDCell(nn.Module):
        
         self.delta_time_to_gamma_h = nn.Linear(delta_time_size, hidden_size, bias=bias)
         
-        self.reset_gate_lin = nn.Linear(input_size + hidden_size + mask_size, hidden_size , bias=bias)
-        self.update_gate_lin = nn.Linear(input_size + hidden_size + mask_size, hidden_size, bias=bias)
-        self.new_gate_lin = nn.Linear(input_size + hidden_size + mask_size, hidden_size, bias=bias)
+        gate_input_size = input_size + hidden_size + feed_missing_mask * mask_size
+        self.reset_gate_lin = nn.Linear(gate_input_size, hidden_size , bias=bias)
+        self.update_gate_lin = nn.Linear(gate_input_size , hidden_size, bias=bias)
+        self.new_gate_lin = nn.Linear(gate_input_size, hidden_size, bias=bias)
         
         # Initialize weights
         nn.init.xavier_normal_(self.reset_gate_lin.weight)
@@ -83,7 +85,7 @@ class GRUDCell(nn.Module):
     def reset_dropout_mask(self, batch_size):
         self.dropout_mask = torch.bernoulli(torch.ones(batch_size, self.hidden_size) * (1 - self.dropout.p)).to(self.device)
         
-    def forward(self, input, hidden_state, x_latest_observations):
+    def forward(self, input, hidden_state, x_latest_observations, x_has_been_observed):
         # Input should be of shape (batch, 3, features)
         # x_latest_observations should be of shape (batch, features)
         X = input[:,0,:].squeeze()
@@ -94,6 +96,10 @@ class GRUDCell(nn.Module):
             # Eq 10:
             w_matrix = torch.diag(self.delta_time_to_gamma_x)
             decay_factor_x = torch.exp(-F.relu(torch.matmul(delta_time, w_matrix)+ self.gamma_x_bias))
+            
+            if not self.feed_missing_mask:
+                # Only decay the observations that have been observed
+                decay_factor_x = decay_factor_x * x_has_been_observed + (1 - x_has_been_observed)
             
             # Eq 11:
             X = X * input_mask + (1 - input_mask) * (decay_factor_x * x_latest_observations + (1 - decay_factor_x) * self.x_mean)
@@ -108,13 +114,13 @@ class GRUDCell(nn.Module):
         if self.dropout_type == 'mloss' and self.training:
             # "Recurrent Dropout without Memory Loss" (https://arxiv.org/abs/1603.05118)
             # Eq 13:
-            gate_input = torch.cat([X, hidden_state, input_mask], dim=-1)
+            gate_input = torch.cat([X, hidden_state, input_mask] if self.feed_missing_mask else [X, hidden_state], dim=-1)
             reset_gate = torch.sigmoid(self.reset_gate_lin(gate_input))
             # Eq 14:
             update_gate = torch.sigmoid(self.update_gate_lin(gate_input))
         
             # Eq 15:
-            new_state_input = torch.cat([X, reset_gate * hidden_state, input_mask], dim=-1)
+            new_state_input = torch.cat([X, reset_gate * hidden_state, input_mask] if self.feed_missing_mask else [X, reset_gate * hidden_state], dim=-1)
             new_state_candidate = torch.tanh(self.new_gate_lin(new_state_input))
             
             new_state_candidate = self.dropout(new_state_candidate)
@@ -125,26 +131,26 @@ class GRUDCell(nn.Module):
             # "A Theoretically Grounded Application of Dropout in Recurrent Neural Networks" (https://arxiv.org/abs/1512.05287)
             hidden_state = hidden_state * self.dropout_mask
             # Eq 13:
-            gate_input = torch.cat([X, hidden_state, input_mask], dim=-1)
+            gate_input = torch.cat([X, hidden_state, input_mask] if self.feed_missing_mask else [X, hidden_state], dim=-1)
             reset_gate = torch.sigmoid(self.reset_gate_lin(gate_input))
             # Eq 14:
             update_gate = torch.sigmoid(self.update_gate_lin(gate_input))
         
             # Eq 15:
-            new_state_input = torch.cat([X, reset_gate * hidden_state, input_mask], dim=-1)
+            new_state_input = torch.cat([X, reset_gate * hidden_state, input_mask] if self.feed_missing_mask else [X, reset_gate * hidden_state], dim=-1)
             new_state_candidate = torch.tanh(self.new_gate_lin(new_state_input))
             
             # Eq 16:
             hidden_state = (1 - update_gate) * hidden_state + update_gate * new_state_candidate
         else:
             # Eq 13:
-            gate_input = torch.cat([X, hidden_state, input_mask], dim=-1)
+            gate_input = torch.cat([X, hidden_state, input_mask] if self.feed_missing_mask else [X, hidden_state], dim=-1)
             reset_gate = torch.sigmoid(self.reset_gate_lin(gate_input))
             # Eq 14:
             update_gate = torch.sigmoid(self.update_gate_lin(gate_input))
         
             # Eq 15:
-            new_state_input = torch.cat([X, reset_gate * hidden_state, input_mask], dim=-1)
+            new_state_input = torch.cat([X, reset_gate * hidden_state, input_mask] if self.feed_missing_mask else [X, reset_gate * hidden_state], dim=-1)
             new_state_candidate = torch.tanh(self.new_gate_lin(new_state_input))
             
             # Eq 16:

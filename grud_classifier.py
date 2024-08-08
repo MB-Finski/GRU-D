@@ -30,6 +30,7 @@ from models.grud.GRUD import GRUD
 from classification_fiter import fit
 import optuna
 import argparse
+from scipy import stats
 
 def parse_args():
     parser = argparse.ArgumentParser(description='GRU-D Classifier')
@@ -38,7 +39,7 @@ def parse_args():
     parser.add_argument('--n_trials', type=int, default=200, help='Number of trials for optimization')
     args = parser.parse_args()
     
-    if args.mode not in ['k_fold', 'optim']:
+    if args.mode not in ['k_fold', 'optim', 'compare']:
         raise ValueError("Mode should be either 'k_fold' or 'optim'")    
     if args.mode == 'k_fold' and args.k < 2:
         raise ValueError("Number of folds should be at least 2")    
@@ -49,10 +50,13 @@ def parse_args():
 
 class ClassificationModel(nn.Module):
     def __init__(self, input_size, hidden_size, output_size, num_layers=1, x_mean=0, 
-                 bias=True, dropout=0, device='cpu', dropout_type='gal'):
+                 bias=True, dropout=0, device='cpu', dropout_type='gal',
+                 feed_missing_mask=True):
         super(ClassificationModel, self).__init__()
         
-        self.grud = GRUD(input_size = input_size, hidden_size = hidden_size, num_layers = num_layers, x_mean = x_mean, bias = bias, dropout = dropout, device = device, dropout_type=dropout_type)
+        self.grud = GRUD(input_size = input_size, hidden_size = hidden_size, num_layers = num_layers, x_mean = x_mean,
+                         bias = bias, dropout = dropout, device = device, dropout_type=dropout_type,
+                         feed_missing_mask=feed_missing_mask)
         
         fc_layers = []
         #for i in range(2):
@@ -98,19 +102,17 @@ def data_dataloader(dataset, outcomes, last_obs, test_proportion = 0.2, batch_si
     test_dataset = utils.TensorDataset(test_data, test_label, test_last_obs)
     
     # Create dataloaders
-    train_dataloader = utils.DataLoader(train_dataset, shuffle=True, batch_size=batch_size)
-    test_dataloader = utils.DataLoader(test_dataset, batch_size=batch_size)
-    
-    print("Training data shape: ",train_data.shape)
-    print("Test data shape: ",test_data.shape)
+    train_dataloader = utils.DataLoader(train_dataset, shuffle=True, batch_size=batch_size, num_workers=0)
+    test_dataloader = utils.DataLoader(test_dataset, batch_size=batch_size, num_workers=0)
     
     return train_dataloader, test_dataloader
 
 
-def do_k_fold_run(k, dropout=0.1, dropout_type='gal', 
-                  lr=0.0018, weight_decay=0.000046, patience=11,
-                  min_delta=-0.008, input_size=33, hidden_size=49,
-                  output_size=1, num_layers=1, bias=True, num_epochs=100, suffle = True):
+def do_k_fold_run(k, dropout=0.06, dropout_type='gal', 
+                  lr=0.003, weight_decay=0.00001, patience=14,
+                  min_delta=-0.005, input_size=33, hidden_size=49,
+                  output_size=1, num_layers=1, bias=True, num_epochs=100,
+                  feed_missing_mask = True, suffle = True):
     test_proportion = 1/k
     
     criterion = nn.BCEWithLogitsLoss()
@@ -133,11 +135,12 @@ def do_k_fold_run(k, dropout=0.1, dropout_type='gal',
     
     auc_scores = []
     for i in range(k):
-        print("Fold: ", i+1)
-        train_dataloader, test_dataloader = data_dataloader(dataset, outcomes, last_time_points, test_proportion = test_proportion, batch_size = 1000)
+        print("-------------------------- Fold: ", i+1, " --------------------------")
+        train_dataloader, test_dataloader = data_dataloader(dataset, outcomes, last_time_points, test_proportion = test_proportion, batch_size = 4000)
         
         model = ClassificationModel(input_size = input_size, hidden_size= hidden_size, output_size=output_size, dropout=dropout,
-                                    x_mean=x_mean, num_layers=num_layers, bias=bias, device=device,dropout_type=dropout_type)
+                                    x_mean=x_mean, num_layers=num_layers, bias=bias, device=device,dropout_type=dropout_type,
+                                    feed_missing_mask=feed_missing_mask)
         model.to(device)
         
         auc_score = fit(model, criterion, lr, train_dataloader, test_dataloader, n_epochs = num_epochs,
@@ -151,12 +154,16 @@ def do_k_fold_run(k, dropout=0.1, dropout_type='gal',
         dataset = np.roll(dataset, int(dataset.shape[0] * test_proportion), axis=0)
         outcomes = np.roll(outcomes, int(dataset.shape[0] * test_proportion), axis=0)
         last_time_points = np.roll(last_time_points, int(dataset.shape[0] * test_proportion), axis=0)
-    
-    print("AUC Scores: ", auc_scores)
-    print("Mean AUC: ", np.mean(auc_scores))
-    print("Std AUC: ", np.std(auc_scores))    
         
-    return np.mean(auc_scores)
+    mean_auc = np.mean(auc_scores)
+    std_auc = np.std(auc_scores)
+    
+    print("Model parameters: ", count_parameters(model))    
+    print("AUC Scores: ", auc_scores)
+    print("Mean AUC: ", mean_auc)
+    print("Std AUC: ", std_auc)    
+        
+    return mean_auc
 
 def do_optimization_run(trial):
     input_size = 33 # Number of features
@@ -185,7 +192,7 @@ if __name__ == "__main__":
     
     if args.mode == 'k_fold':
         k = args.k
-        auc_scores = do_k_fold_run(k)
+        do_k_fold_run(k)
     elif args.mode == 'optim':
         study = optuna.create_study(direction='maximize')
         study.optimize(do_optimization_run, n_trials=args.n_trials)
@@ -194,4 +201,49 @@ if __name__ == "__main__":
         print("Best trial:")
         print("Value: ", best_trial.value)
         print("Params: ", best_trial.params)
+    elif args.mode == 'compare':
+        # Compare two different configurations until one is shown better with 95% confidence
+        
+        mean_aucs_1 = []
+        mean_aucs_2 = []
+        
+        while True:
+            # Configuration 1
+            auc_1 = do_k_fold_run(5, feed_missing_mask=True)
+            mean_aucs_1.append(auc_1)
+            
+            # Configuration 2
+            auc_2 = do_k_fold_run(5, feed_missing_mask=False, hidden_size=56)
+            mean_aucs_2.append(auc_2)
+            
+            mean_auc_1 = np.mean(mean_aucs_1)
+            mean_auc_2 = np.mean(mean_aucs_2)
+            std_auc_1 = np.std(mean_aucs_1)
+            std_auc_2 = np.std(mean_aucs_2)
+            
+            print("-----------------------------------------------------------------")
+            print("-------------------------Comparison------------------------------")
+            print("Mean AUC 1: ", mean_auc_1)
+            print("Mean AUC 2: ", mean_auc_2)
+            print("Std AUC 1: ", std_auc_1)
+            print("Std AUC 2: ", std_auc_2)
+            
+            if len(mean_aucs_1) < 2:
+                continue
+            
+            # Perform Welch's t-test
+            t_stat, p_val = stats.ttest_ind(mean_aucs_1, mean_aucs_2)
+            
+            print("T-statistic: ", t_stat)
+            print("P-value: ", p_val)
+            
+            if p_val < 0.05:
+                if mean_auc_1 > mean_auc_2:
+                    print("Configuration 1 is better")
+                else:
+                    print("Configuration 2 is better")
+                break
+            
+        
+        
     

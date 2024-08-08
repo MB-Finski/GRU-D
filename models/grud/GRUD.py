@@ -65,7 +65,7 @@ class OutputDropout(nn.Module):
 
 class GRUD(nn.Module):
     def __init__(self, input_size: int, hidden_size: int, num_layers: int, x_mean: torch.Tensor | None = None, 
-                 dropout: None | float = None, device: str ='cpu', bias: bool =True, dropout_type: str ='mloss'):
+                 dropout: None | float = None, device: str ='cpu', bias: bool =True, dropout_type: str ='mloss', feed_missing_mask: bool = True):   
         super(GRUD, self).__init__()
         
         # Validate the inputs
@@ -86,6 +86,7 @@ class GRUD(nn.Module):
         self.num_layers = num_layers
         self.x_mean = x_mean
         self.input_size = input_size
+        self.feed_missing_mask = feed_missing_mask
         
         self.grud_cells = nn.ModuleList()
         
@@ -100,12 +101,15 @@ class GRUD(nn.Module):
             self.output_dropouts = None
         
         # First GRUDCell
-        self.grud_cells.append(GRUDCell(input_size=input_size, hidden_size=hidden_size, x_mean=x_mean, dropout=dropout, device=device, bias=bias))
+        self.grud_cells.append(GRUDCell(input_size=input_size, hidden_size=hidden_size, x_mean=x_mean, 
+                                        dropout=dropout, device=device, bias=bias, dropout_type=dropout_type,
+                                        feed_missing_mask=feed_missing_mask))
         
         # Additional GRUDCells
         for _ in range(num_layers-1):
             self.grud_cells.append(GRUDCell(input_size=hidden_size, hidden_size=hidden_size, mask_size=input_size,
-                                            delta_time_size=input_size, x_mean=None, dropout=dropout, device=device, bias=bias))
+                                            delta_time_size=input_size, x_mean=None, dropout=dropout, device=device, bias=bias,
+                                            dropout_type=dropout_type, feed_missing_mask=feed_missing_mask))
             
     def initialize_hidden(self, batch_size):
         device = next(self.parameters()).device
@@ -125,10 +129,17 @@ class GRUD(nn.Module):
             for cell in self.grud_cells:
                 cell.reset_dropout_mask(batch_size)
         
-        # TODO: We may wish to initialize the x_latest_observations using the x_mean instead.
-        #x_latest_observations = torch.zeros(batch_size, self.input_size).to(input.device)
-        x_latest_observations = self.x_mean.repeat(batch_size, 1).to(input.device)
         
+        #x_latest_observations = torch.zeros(batch_size, self.input_size).to(input.device)
+        if self.feed_missing_mask:
+            x_latest_observations = self.x_mean.repeat(batch_size, 1).to(input.device)
+        else:
+            # TODO: we're just assuming that -5 is exceedingly unlikely to be a real observation
+            # This is a bit of a hack, but it works as long as the input is standardized
+            #x_latest_observations = torch.ones(batch_size, self.input_size).to(input.device) * -5.0
+            x_latest_observations = torch.ones(batch_size, self.input_size).to(input.device)
+            x_has_been_observed = torch.zeros(batch_size, self.input_size).to(input.device)
+    
         hidden_states = []
         last_layer_hidden_states = torch.empty(seq_len, batch_size, self.hidden_size).to(input.device)
         
@@ -151,9 +162,10 @@ class GRUD(nn.Module):
                 if i == 0:
                     # First layer
                     # Only the first layer has use for x_latest_observations
-                    hidden_state = cell(step_input, hidden_states[i], x_latest_observations = x_latest_observations)
+                    hidden_state = cell(step_input, hidden_states[i], x_latest_observations = x_latest_observations,
+                                        x_has_been_observed = x_has_been_observed if not self.feed_missing_mask else None)
                 else:
-                    hidden_state = cell(step_input, hidden_states[i], x_latest_observations = None)
+                    hidden_state = cell(step_input, hidden_states[i], x_latest_observations = None, x_has_been_observed = None)
                     
                 if self.output_dropouts is not None:
                     hidden_state = self.output_dropouts[i](hidden_state)                    
@@ -162,6 +174,8 @@ class GRUD(nn.Module):
                 
             # Update x_latest_observations and save the hidden state of the last layer for this time point
             x_latest_observations = torch.where(step_mask > 0, step_x, x_latest_observations)
+            if not self.feed_missing_mask:
+                x_has_been_observed = torch.where(step_mask > 0, torch.ones_like(x_has_been_observed).to(input.device), x_has_been_observed)
             last_layer_hidden_states[sequence_index] = hidden_state
             
         return last_layer_hidden_states

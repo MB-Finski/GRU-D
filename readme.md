@@ -11,6 +11,7 @@ The files under /models/grud contain modular GRUDCell and GRUD files with simila
 ```
 python3 grud_classifier.py --mode k_fold -k 5
 
+>>> Model parameters:  18834
 >>> AUC Scores:  [0.8559997859130807, 0.8564583333333332, 0.8497795039851115, 0.8428457485061258, 0.8183071076857202]
 >>> Mean AUC:  0.8446780958846745
 >>> Std AUC:  0.014083788833679355
