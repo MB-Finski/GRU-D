@@ -24,27 +24,6 @@ import torch.nn as nn
 
 from models.grud.GRUDCell import GRUDCell
 
-class InputDropout(nn.Module):
-    def __init__(self, dropout: float = 0.1):
-        super(InputDropout, self).__init__()
-        
-        
-        self.dropout = dropout
-        
-    def forward(self, input):
-        if self.training:
-            
-            # Input is of shape (batch, 3, seq_len, features)
-            # We want to apply dropout to the features consistently across the sequences
-            mask = torch.bernoulli(torch.ones(input.size(0),input.size(1), input.size(-1)) * (1 - self.dropout))
-
-            # Repeat the mask for each sequence in the batch
-            mask = mask.unsqueeze(2).expand(-1, -1, input.size(-2), -1).to(input.device)
-            return input * mask
-            
-        else:
-            return input
-        
 class OutputDropout(nn.Module):
     def __init__(self, dropout: float = 0.1, device: str ='cpu'):
         super(OutputDropout, self).__init__()
@@ -65,7 +44,8 @@ class OutputDropout(nn.Module):
 
 class GRUD(nn.Module):
     def __init__(self, input_size: int, hidden_size: int, num_layers: int, x_mean: torch.Tensor | None = None, 
-                 dropout: None | float = None, device: str ='cpu', bias: bool =True, dropout_type: str ='mloss', feed_missing_mask: bool = True):   
+                 dropout: None | float = None, device: str ='cpu', bias: bool =True, dropout_type: str ='mloss',
+                 feed_missing_mask: bool = True, output_dropout: float | None = 0.0):   
         super(GRUD, self).__init__()
         
         # Validate the inputs
@@ -87,17 +67,15 @@ class GRUD(nn.Module):
         self.x_mean = x_mean
         self.input_size = input_size
         self.feed_missing_mask = feed_missing_mask
+        self.dropout_type = dropout_type
         
         self.grud_cells = nn.ModuleList()
         
-        if dropout is not None and dropout_type == 'gal':
-            self.input_dropout = InputDropout(dropout)
+        if output_dropout is not None and dropout_type == 'gal':
             self.output_dropouts = []
             for _ in range(num_layers):
-                self.output_dropouts.append(OutputDropout(dropout, device))
-            
-        else:
-            self.input_dropout = None
+                self.output_dropouts.append(OutputDropout(dropout, device))            
+        else:            
             self.output_dropouts = None
         
         # First GRUDCell
@@ -123,9 +101,10 @@ class GRUD(nn.Module):
         batch_size = input.size(0)
         seq_len = input.size(2)
         
-        if self.input_dropout is not None:
-            input = self.input_dropout(input)
+        if self.dropout_type == 'gal':
             
+            # Reset the dropout masks for W, U and V before each batch
+            # Such that the same mask is applied for each time step
             for cell in self.grud_cells:
                 cell.reset_dropout_mask(batch_size)
         
@@ -134,7 +113,7 @@ class GRUD(nn.Module):
         if self.feed_missing_mask:
             x_latest_observations = self.x_mean.repeat(batch_size, 1).to(input.device)
         else:
-            # TODO: we're just assuming that -5 is exceedingly unlikely to be a real observation
+            # TODO: we're just assuming that 1 is less likely to be a real observation
             # This is a bit of a hack, but it works as long as the input is standardized
             #x_latest_observations = torch.ones(batch_size, self.input_size).to(input.device) * -5.0
             x_latest_observations = torch.ones(batch_size, self.input_size).to(input.device)
@@ -167,8 +146,8 @@ class GRUD(nn.Module):
                 else:
                     hidden_state = cell(step_input, hidden_states[i], x_latest_observations = None, x_has_been_observed = None)
                     
-                if self.output_dropouts is not None:
-                    hidden_state = self.output_dropouts[i](hidden_state)                    
+                if self.output_dropouts is not None: # Only applies to gal dropout
+                    hidden_state = self.output_dropouts[i](hidden_state)          
                 
                 hidden_states[i] = hidden_state
                 

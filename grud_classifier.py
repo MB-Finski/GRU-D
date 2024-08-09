@@ -108,10 +108,10 @@ def data_dataloader(dataset, outcomes, last_obs, test_proportion = 0.2, batch_si
     return train_dataloader, test_dataloader
 
 
-def do_k_fold_run(k, dropout=0.06, dropout_type='gal', 
-                  lr=0.003, weight_decay=0.00001, patience=14,
-                  min_delta=-0.005, input_size=33, hidden_size=49,
-                  output_size=1, num_layers=1, bias=True, num_epochs=100,
+def do_k_fold_run(k, dropout=0.3, dropout_type='gal', 
+                  lr=0.005, weight_decay=0.00000, patience=30,
+                  min_delta=0.006, input_size=33, hidden_size=49,
+                  output_size=1, num_layers=1, bias=True, num_epochs=200,
                   feed_missing_mask = True, suffle = True):
     test_proportion = 1/k
     
@@ -136,7 +136,7 @@ def do_k_fold_run(k, dropout=0.06, dropout_type='gal',
     auc_scores = []
     for i in range(k):
         print("-------------------------- Fold: ", i+1, " --------------------------")
-        train_dataloader, test_dataloader = data_dataloader(dataset, outcomes, last_time_points, test_proportion = test_proportion, batch_size = 4000)
+        train_dataloader, test_dataloader = data_dataloader(dataset, outcomes, last_time_points, test_proportion = test_proportion, batch_size =4000)
         
         model = ClassificationModel(input_size = input_size, hidden_size= hidden_size, output_size=output_size, dropout=dropout,
                                     x_mean=x_mean, num_layers=num_layers, bias=bias, device=device,dropout_type=dropout_type,
@@ -161,9 +161,9 @@ def do_k_fold_run(k, dropout=0.06, dropout_type='gal',
     print("Model parameters: ", count_parameters(model))    
     print("AUC Scores: ", auc_scores)
     print("Mean AUC: ", mean_auc)
-    print("Std AUC: ", std_auc)    
+    print("Std AUC: ", std_auc)
         
-    return mean_auc
+    return mean_auc, std_auc
 
 def do_optimization_run(trial):
     input_size = 33 # Number of features
@@ -171,20 +171,21 @@ def do_optimization_run(trial):
     output_size = 1
     num_layers = 1 # Number of GRUD layers
     bias = True
-    dropout = trial.suggest_float('dropout', 0.0, 0.6)
-    dropout_type = 'gal' # 'gal' or 'mloss'
-    num_epochs = 50
+    dropout = 0.3 #trial.suggest_float('dropout', 0.0, 0.6)
+    dropout_type = 'gal' #trial.suggest_categorical('dropout_type', ['gal', 'mloss'])
+    num_epochs = 100
     lr = trial.suggest_float('lr', 0.00001, 0.01, log=True)
-    weight_decay = trial.suggest_float('weight_decay', 0.00001, 0.01, log=True)
+    weight_decay = trial.suggest_float('weight_decay', 0.0000001, 0.1, log=True)
     patience = trial.suggest_int('patience', 2, 15)
     min_delta = trial.suggest_float('min_delta', -0.01, 0.01)
     
-    auc_score = do_k_fold_run(5, dropout=dropout, dropout_type=dropout_type,
+    mean_auc, auc_std = do_k_fold_run(5, dropout=dropout, dropout_type=dropout_type,
                               lr=lr, weight_decay=weight_decay, patience=patience,
                               min_delta=min_delta, input_size=input_size, hidden_size=hidden_size,
-                              output_size=output_size, num_layers=num_layers, bias=bias, num_epochs=num_epochs, suffle=False)
+                              output_size=output_size, num_layers=num_layers, bias=bias, num_epochs=num_epochs,
+                              suffle=False)
     
-    return auc_score
+    return mean_auc - 1.96 * auc_std / np.sqrt(5)
 
 if __name__ == "__main__":
     
@@ -195,7 +196,12 @@ if __name__ == "__main__":
         do_k_fold_run(k)
     elif args.mode == 'optim':
         study = optuna.create_study(direction='maximize')
-        study.optimize(do_optimization_run, n_trials=args.n_trials)
+        
+        try:
+            study.optimize(do_optimization_run, n_trials=args.n_trials)
+        except KeyboardInterrupt:
+            print("Optimization interrupted")
+        
         
         best_trial = study.best_trial
         print("Best trial:")
@@ -209,11 +215,11 @@ if __name__ == "__main__":
         
         while True:
             # Configuration 1
-            auc_1 = do_k_fold_run(5, feed_missing_mask=True)
+            auc_1, _ = do_k_fold_run(5, feed_missing_mask=True)
             mean_aucs_1.append(auc_1)
             
             # Configuration 2
-            auc_2 = do_k_fold_run(5, feed_missing_mask=False, hidden_size=56)
+            auc_2, _ = do_k_fold_run(5, feed_missing_mask=False, hidden_size=56)
             mean_aucs_2.append(auc_2)
             
             mean_auc_1 = np.mean(mean_aucs_1)
@@ -228,7 +234,7 @@ if __name__ == "__main__":
             print("Std AUC 1: ", std_auc_1)
             print("Std AUC 2: ", std_auc_2)
             
-            if len(mean_aucs_1) < 2:
+            if len(mean_aucs_1) < 3:
                 continue
             
             # Perform Welch's t-test

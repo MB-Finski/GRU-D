@@ -83,7 +83,9 @@ class GRUDCell(nn.Module):
             nn.init.zeros_(self.gamma_x_bias)
             
     def reset_dropout_mask(self, batch_size):
-        self.dropout_mask = torch.bernoulli(torch.ones(batch_size, self.hidden_size) * (1 - self.dropout.p)).to(self.device)
+        self.hidden_dropout_mask = torch.bernoulli(torch.ones(batch_size, self.hidden_size) * (1 - self.dropout.p)).to(self.device)
+        self.x_dropout_mask = torch.bernoulli(torch.ones(batch_size, self.input_size) * (1 - self.dropout.p)).to(self.device)
+        self.input_mask_dropout_mask = torch.bernoulli(torch.ones(batch_size, self.input_size) * (1 - self.dropout.p)).to(self.device)
         
     def forward(self, input, hidden_state, x_latest_observations, x_has_been_observed):
         # Input should be of shape (batch, 3, features)
@@ -129,7 +131,10 @@ class GRUDCell(nn.Module):
             hidden_state = (1 - update_gate) * hidden_state + update_gate * new_state_candidate
         if self.dropout_type == 'gal' and self.training:
             # "A Theoretically Grounded Application of Dropout in Recurrent Neural Networks" (https://arxiv.org/abs/1512.05287)
-            hidden_state = hidden_state * self.dropout_mask
+            hidden_state = hidden_state * self.hidden_dropout_mask
+            X = X * self.x_dropout_mask
+            input_mask = input_mask * self.input_mask_dropout_mask
+            
             # Eq 13:
             gate_input = torch.cat([X, hidden_state, input_mask] if self.feed_missing_mask else [X, hidden_state], dim=-1)
             reset_gate = torch.sigmoid(self.reset_gate_lin(gate_input))
