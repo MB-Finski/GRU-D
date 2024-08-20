@@ -109,9 +109,9 @@ def data_dataloader(dataset, outcomes, last_obs, test_proportion = 0.2, batch_si
 
 
 def do_k_fold_run(k, dropout=0.3, dropout_type='gal', 
-                  lr=0.005, weight_decay=0.00000, patience=30,
+                  lr=0.027, weight_decay=0.0000077, patience=30,
                   min_delta=0.006, input_size=33, hidden_size=49,
-                  output_size=1, num_layers=1, bias=True, num_epochs=200,
+                  output_size=1, num_layers=1, bias=True, num_epochs=100,
                   feed_missing_mask = True, suffle = True):
     test_proportion = 1/k
     
@@ -174,10 +174,10 @@ def do_optimization_run(trial):
     dropout = 0.3 #trial.suggest_float('dropout', 0.0, 0.6)
     dropout_type = 'gal' #trial.suggest_categorical('dropout_type', ['gal', 'mloss'])
     num_epochs = 100
-    lr = trial.suggest_float('lr', 0.00001, 0.01, log=True)
+    lr = trial.suggest_float('lr', 0.00001, 0.1, log=True)
     weight_decay = trial.suggest_float('weight_decay', 0.0000001, 0.1, log=True)
-    patience = trial.suggest_int('patience', 2, 15)
-    min_delta = trial.suggest_float('min_delta', -0.01, 0.01)
+    patience = 20 #trial.suggest_int('patience', 2, 15)
+    min_delta = 0.006#trial.suggest_float('min_delta', -0.01, 0.01)
     
     mean_auc, auc_std = do_k_fold_run(5, dropout=dropout, dropout_type=dropout_type,
                               lr=lr, weight_decay=weight_decay, patience=patience,
